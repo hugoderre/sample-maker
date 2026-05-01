@@ -17,7 +17,6 @@ import {
 } from 'lucide-react';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin, { Region } from 'wavesurfer.js/dist/plugins/regions.esm.js';
-import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js';
 
 type DownloadedSample = {
   id: string;
@@ -115,9 +114,10 @@ export default function App() {
   const [chops, setChops] = useState<Chop[]>([]);
   const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const [timelineScroll, setTimelineScroll] = useState(0);
+  const [timelineWidth, setTimelineWidth] = useState(0);
 
   const waveformRef = useRef<HTMLDivElement | null>(null);
-  const timelineRef = useRef<HTMLDivElement | null>(null);
   const waveWrapRef = useRef<HTMLDivElement | null>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<RegionsPlugin | null>(null);
@@ -135,6 +135,27 @@ export default function App() {
     sample && isReady && activeRegionId && selectionDuration >= MIN_REGION_SECONDS && !isExporting
   );
   const currentChopLabel = chops.find((chop) => chop.id === activeRegionId)?.label || 'No chop';
+  const timelineTotalWidth = Math.max(timelineWidth, (sample?.duration || 0) * zoom);
+  const timelineTicks = useMemo(() => {
+    if (!sample || timelineWidth <= 0) return [];
+
+    const interval = zoom >= 120 ? 1 : zoom >= 70 ? 2 : zoom >= 40 ? 5 : 10;
+    const majorInterval = zoom >= 120 ? 5 : zoom >= 70 ? 10 : zoom >= 40 ? 15 : 30;
+    const visibleStart = Math.max(0, timelineScroll / zoom - interval * 2);
+    const visibleEnd = Math.min(sample.duration, (timelineScroll + timelineWidth) / zoom + interval * 2);
+    const firstTick = Math.floor(visibleStart / interval) * interval;
+    const ticks = [];
+
+    for (let time = firstTick; time <= visibleEnd; time += interval) {
+      const roundedTime = Math.round(time * 1000) / 1000;
+      ticks.push({
+        time: roundedTime,
+        major: Math.round(roundedTime) % majorInterval === 0
+      });
+    }
+
+    return ticks;
+  }, [sample, timelineScroll, timelineWidth, zoom]);
 
   function paintRegions(activeId = activeRegionIdRef.current) {
     regionsRef.current?.getRegions().forEach((region) => {
@@ -325,7 +346,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!sample || !waveformRef.current || !timelineRef.current) return;
+    if (!sample || !waveformRef.current) return;
 
     setIsReady(false);
     setIsPlaying(false);
@@ -335,18 +356,6 @@ export default function App() {
     activeRegionIdRef.current = null;
 
     const regions = RegionsPlugin.create();
-    const timeline = TimelinePlugin.create({
-      container: timelineRef.current,
-      height: 34,
-      timeInterval: 5,
-      primaryLabelInterval: 15,
-      secondaryLabelInterval: 5,
-      formatTimeCallback: formatAxisTime,
-      style: {
-        color: 'rgba(247, 244, 238, 0.76)',
-        fontSize: '12px'
-      }
-    });
 
     const wavesurfer = WaveSurfer.create({
       container: waveformRef.current,
@@ -361,11 +370,15 @@ export default function App() {
       barRadius: 2,
       normalize: true,
       minPxPerSec: zoom,
-      plugins: [regions, timeline]
+      plugins: [regions]
     });
 
     wavesurferRef.current = wavesurfer;
     regionsRef.current = regions;
+    const updateTimelineMetrics = () => {
+      setTimelineScroll(wavesurfer.getScroll());
+      setTimelineWidth(wavesurfer.getWidth());
+    };
     const disableDragSelection = regions.enableDragSelection(
       {
         color: ACTIVE_COLOR,
@@ -378,12 +391,20 @@ export default function App() {
 
     wavesurfer.on('ready', () => {
       wavesurfer.zoom(zoom);
+      updateTimelineMetrics();
       setIsReady(true);
       setStart(0);
       setEnd(0);
       setMessage('Drag anywhere on the waveform to create a chop.');
     });
 
+    wavesurfer.on('scroll', (_visibleStart, _visibleEnd, scrollLeft) => {
+      setTimelineScroll(scrollLeft);
+      setTimelineWidth(wavesurfer.getWidth());
+    });
+    wavesurfer.on('zoom', updateTimelineMetrics);
+    wavesurfer.on('redraw', updateTimelineMetrics);
+    wavesurfer.on('resize', updateTimelineMetrics);
     wavesurfer.on('play', () => setIsPlaying(true));
     wavesurfer.on('pause', () => setIsPlaying(false));
     wavesurfer.on('finish', () => setIsPlaying(false));
@@ -742,7 +763,27 @@ export default function App() {
         </div>
 
         <div ref={waveWrapRef} className="wave-wrap">
-          <div ref={timelineRef} className="timeline" />
+          <div className="timeline">
+            {sample && (
+              <div
+                className="timeline-track"
+                style={{
+                  width: timelineTotalWidth,
+                  transform: `translateX(${-timelineScroll}px)`
+                }}
+              >
+                {timelineTicks.map((tick) => (
+                  <div
+                    className={`timeline-tick ${tick.major ? 'major' : ''}`}
+                    key={tick.time}
+                    style={{ left: tick.time * zoom }}
+                  >
+                    {tick.major && <span>{formatAxisTime(tick.time)}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <div ref={waveformRef} className="waveform" />
           {!sample && (
             <div className="empty-wave">

@@ -211,23 +211,43 @@ h2 {
 }
 
 .timeline {
+  position: relative;
   height: 34px;
+  overflow: hidden;
   color: rgba(247, 244, 238, 0.7);
   border-bottom: 1px solid rgba(247, 244, 238, 0.1);
   background: rgba(247, 244, 238, 0.035);
 }
 
-.timeline [part~="timeline"] {
-  color: rgba(247, 244, 238, 0.76);
+.timeline-track {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 100%;
+  will-change: transform;
 }
 
-.timeline [part~="timeline-notch"] {
-  border-color: rgba(247, 244, 238, 0.48);
+.timeline-tick {
+  position: absolute;
+  top: 15px;
+  bottom: 0;
+  width: 1px;
+  background: rgba(247, 244, 238, 0.28);
 }
 
-.timeline [part~="timeline-notch-primary"] {
+.timeline-tick.major {
+  top: 0;
+  background: rgba(246, 189, 96, 0.62);
+}
+
+.timeline-tick span {
+  position: absolute;
+  top: 3px;
+  left: 5px;
   color: #f6bd60;
+  font-size: 0.72rem;
   font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .empty-wave {
@@ -246,7 +266,7 @@ h2 {
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(4, 44px) minmax(160px, 0.45fr) repeat(2, minmax(120px, 0.34fr)) minmax(260px, 1fr) auto auto;
+  grid-template-columns: repeat(4, 44px) minmax(144px, 180px) repeat(2, minmax(96px, 120px)) minmax(220px, 1fr) minmax(150px, 170px) minmax(140px, 160px);
   gap: 12px;
   align-items: end;
 }
@@ -317,6 +337,7 @@ h2 {
 }
 
 .selection-readout {
+  min-width: 240px;
   min-height: 44px;
   display: grid;
   grid-template-columns: 1fr auto 1fr;
@@ -339,6 +360,7 @@ h2 {
 }
 
 .format-switch {
+  min-width: 168px;
   height: 44px;
   display: grid;
   grid-template-columns: repeat(3, minmax(54px, 1fr));
@@ -352,6 +374,10 @@ h2 {
   font-size: 0.78rem;
   font-weight: 800;
   cursor: pointer;
+}
+
+.export-button {
+  min-width: 150px;
 }
 
 .format-switch button.active {
