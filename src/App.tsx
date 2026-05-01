@@ -11,7 +11,6 @@ import {
   Scissors,
   Search,
   SkipBack,
-  TimerReset,
   Trash2
 } from 'lucide-react';
 import WaveSurfer from 'wavesurfer.js';
@@ -58,6 +57,8 @@ type ApiError = {
 
 const MIN_REGION_SECONDS = 0.05;
 const DEFAULT_CHOP_SECONDS = 8;
+const EDGE_SCROLL_ZONE = 96;
+const EDGE_SCROLL_MAX_SPEED = 7;
 const ACTIVE_COLOR = 'rgba(242, 132, 130, 0.34)';
 const CHOP_COLOR = 'rgba(132, 165, 157, 0.26)';
 
@@ -67,6 +68,13 @@ function formatClock(seconds: number) {
   const secs = Math.floor(seconds % 60);
   const millis = Math.floor((seconds % 1) * 1000);
   return `${minutes}:${secs.toString().padStart(2, '0')}.${millis.toString().padStart(3, '0')}`;
+}
+
+function formatAxisTime(seconds: number) {
+  if (!Number.isFinite(seconds)) return '0:00';
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${minutes}:${secs.toString().padStart(2, '0')}`;
 }
 
 function formatSeconds(seconds: number) {
@@ -99,14 +107,20 @@ export default function App() {
 
   const waveformRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const waveWrapRef = useRef<HTMLDivElement | null>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<RegionsPlugin | null>(null);
   const activeRegionRef = useRef<Region | null>(null);
   const activeRegionIdRef = useRef<string | null>(null);
+  const autoScrollFrameRef = useRef<number | null>(null);
+  const autoScrollVelocityRef = useRef(0);
+  const isRegionDragRef = useRef(false);
 
   const selectionDuration = useMemo(() => Math.max(0, end - start), [end, start]);
-  const canExport = Boolean(sample && isReady && selectionDuration >= MIN_REGION_SECONDS && !isExporting);
-  const currentChopLabel = chops.find((chop) => chop.id === activeRegionId)?.label || 'Selection';
+  const canExport = Boolean(
+    sample && isReady && activeRegionId && selectionDuration >= MIN_REGION_SECONDS && !isExporting
+  );
+  const currentChopLabel = chops.find((chop) => chop.id === activeRegionId)?.label || 'No chop';
 
   function paintRegions(activeId = activeRegionIdRef.current) {
     regionsRef.current?.getRegions().forEach((region) => {
@@ -163,6 +177,64 @@ export default function App() {
     return region;
   }
 
+  function stopEdgeAutoScroll() {
+    autoScrollVelocityRef.current = 0;
+    isRegionDragRef.current = false;
+    if (autoScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(autoScrollFrameRef.current);
+      autoScrollFrameRef.current = null;
+    }
+  }
+
+  function startEdgeAutoScroll(velocity: number) {
+    if (!wavesurferRef.current) return;
+
+    autoScrollVelocityRef.current = velocity;
+    if (autoScrollFrameRef.current !== null) return;
+
+    const tick = () => {
+      const wavesurfer = wavesurferRef.current;
+      if (!wavesurfer || autoScrollVelocityRef.current === 0) {
+        autoScrollFrameRef.current = null;
+        return;
+      }
+
+      wavesurfer.setScroll(wavesurfer.getScroll() + autoScrollVelocityRef.current);
+      autoScrollFrameRef.current = window.requestAnimationFrame(tick);
+    };
+
+    autoScrollFrameRef.current = window.requestAnimationFrame(tick);
+  }
+
+  function isRegionPointerTarget(target: EventTarget | null) {
+    return target instanceof Element && Boolean(target.closest('[part*="region"]'));
+  }
+
+  function handleWavePointerMove(event: PointerEvent) {
+    if (!waveWrapRef.current || !isRegionDragRef.current || !regionsRef.current?.getRegions().length) {
+      stopEdgeAutoScroll();
+      return;
+    }
+
+    const bounds = waveWrapRef.current.getBoundingClientRect();
+    const rightDistance = bounds.right - event.clientX;
+    const leftDistance = event.clientX - bounds.left;
+
+    if (rightDistance < EDGE_SCROLL_ZONE) {
+      const pressure = Math.max(0, Math.min(1, 1 - rightDistance / EDGE_SCROLL_ZONE));
+      startEdgeAutoScroll(Math.max(1, Math.round(pressure * EDGE_SCROLL_MAX_SPEED)));
+      return;
+    }
+
+    if (leftDistance < EDGE_SCROLL_ZONE) {
+      const pressure = Math.max(0, Math.min(1, 1 - leftDistance / EDGE_SCROLL_ZONE));
+      startEdgeAutoScroll(-Math.max(1, Math.round(pressure * EDGE_SCROLL_MAX_SPEED)));
+      return;
+    }
+
+    stopEdgeAutoScroll();
+  }
+
   useEffect(() => {
     if (!sample || !waveformRef.current || !timelineRef.current) return;
 
@@ -176,9 +248,15 @@ export default function App() {
     const regions = RegionsPlugin.create();
     const timeline = TimelinePlugin.create({
       container: timelineRef.current,
+      height: 34,
       timeInterval: 5,
       primaryLabelInterval: 15,
-      secondaryLabelInterval: 5
+      secondaryLabelInterval: 5,
+      formatTimeCallback: formatAxisTime,
+      style: {
+        color: 'rgba(247, 244, 238, 0.76)',
+        fontSize: '12px'
+      }
     });
 
     const wavesurfer = WaveSurfer.create({
@@ -199,12 +277,21 @@ export default function App() {
 
     wavesurferRef.current = wavesurfer;
     regionsRef.current = regions;
+    const disableDragSelection = regions.enableDragSelection(
+      {
+        color: ACTIVE_COLOR,
+        drag: true,
+        resize: true,
+        minLength: MIN_REGION_SECONDS
+      },
+      4
+    );
 
     wavesurfer.on('ready', () => {
-      const initialEnd = Math.min(sample.duration || wavesurfer.getDuration(), 12);
-      createRegion(0, initialEnd);
       setIsReady(true);
-      setMessage('Drag the handles, add chops, then export.');
+      setStart(0);
+      setEnd(0);
+      setMessage('Drag anywhere on the waveform to create a chop.');
     });
 
     wavesurfer.on('play', () => setIsPlaying(true));
@@ -212,6 +299,11 @@ export default function App() {
     wavesurfer.on('finish', () => setIsPlaying(false));
 
     regions.on('region-updated', (region) => {
+      selectRegion(region);
+      syncChops();
+    });
+
+    regions.on('region-created', (region) => {
       selectRegion(region);
       syncChops();
     });
@@ -229,11 +321,41 @@ export default function App() {
     });
 
     return () => {
+      stopEdgeAutoScroll();
+      disableDragSelection();
       wavesurfer.destroy();
       wavesurferRef.current = null;
       regionsRef.current = null;
       activeRegionRef.current = null;
       activeRegionIdRef.current = null;
+    };
+  }, [sample]);
+
+  useEffect(() => {
+    const waveWrap = waveWrapRef.current;
+    if (!waveWrap) return;
+
+    const onPointerEnd = () => {
+      document.removeEventListener('pointermove', handleWavePointerMove);
+      stopEdgeAutoScroll();
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!isRegionPointerTarget(event.target)) return;
+      isRegionDragRef.current = true;
+      document.addEventListener('pointermove', handleWavePointerMove);
+      document.addEventListener('pointerup', onPointerEnd, { once: true });
+      document.addEventListener('pointercancel', onPointerEnd, { once: true });
+    };
+
+    waveWrap.addEventListener('pointerdown', onPointerDown);
+
+    return () => {
+      waveWrap.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('pointermove', handleWavePointerMove);
+      document.removeEventListener('pointerup', onPointerEnd);
+      document.removeEventListener('pointercancel', onPointerEnd);
+      stopEdgeAutoScroll();
     };
   }, [sample]);
 
@@ -251,8 +373,11 @@ export default function App() {
       if (job.status === 'done' && job.sample) {
         setSample(job.sample);
         setStart(0);
-        setEnd(Math.min(job.sample.duration, 12));
-        setMessage('Audio loaded. Build your sample.');
+        setEnd(0);
+        setActiveRegionId(null);
+        activeRegionRef.current = null;
+        activeRegionIdRef.current = null;
+        setMessage('Audio loaded. Drag on the waveform to create a chop.');
         done = true;
       }
 
@@ -310,7 +435,7 @@ export default function App() {
   function addChop() {
     if (!sample) return;
 
-    const anchor = activeRegionRef.current?.end || wavesurferRef.current?.getCurrentTime() || 0;
+    const anchor = wavesurferRef.current?.getCurrentTime() || start || 0;
     const nextStart = Math.min(Math.max(anchor, 0), Math.max(0, sample.duration - MIN_REGION_SECONDS));
     const nextEnd = Math.min(nextStart + DEFAULT_CHOP_SECONDS, sample.duration);
     createRegion(nextStart, nextEnd);
@@ -318,7 +443,7 @@ export default function App() {
 
   function deleteActiveChop() {
     const region = activeRegionRef.current;
-    if (!region || !regionsRef.current || !sample) return;
+    if (!region || !regionsRef.current) return;
 
     region.remove();
     const remaining = regionsRef.current.getRegions();
@@ -328,11 +453,12 @@ export default function App() {
       return;
     }
 
-    createRegion(0, Math.min(sample.duration, 12));
-  }
-
-  function resetActiveChop() {
-    updateRegion(0, Math.min(sample?.duration || 12, 12));
+    activeRegionRef.current = null;
+    activeRegionIdRef.current = null;
+    setActiveRegionId(null);
+    setStart(0);
+    setEnd(0);
+    syncChops();
   }
 
   function togglePlayback() {
@@ -467,9 +593,9 @@ export default function App() {
           <div className="status-pill">{message}</div>
         </div>
 
-        <div className="wave-wrap">
-          <div ref={waveformRef} className="waveform" />
+        <div ref={waveWrapRef} className="wave-wrap">
           <div ref={timelineRef} className="timeline" />
+          <div ref={waveformRef} className="waveform" />
           {!sample && (
             <div className="empty-wave">
               <Scissors size={42} />
@@ -479,19 +605,16 @@ export default function App() {
         </div>
 
         <div className="controls">
-          <button className="icon-button" onClick={togglePlayback} disabled={!isReady} title="Play selection">
+          <button className="icon-button" onClick={togglePlayback} disabled={!activeRegionId} title="Play selection">
             {isPlaying ? <Pause size={20} /> : <Play size={20} />}
           </button>
-          <button className="icon-button" onClick={rewindToSelection} disabled={!isReady} title="Jump to start">
+          <button className="icon-button" onClick={rewindToSelection} disabled={!activeRegionId} title="Jump to start">
             <SkipBack size={20} />
-          </button>
-          <button className="icon-button" onClick={resetActiveChop} disabled={!isReady} title="Reset chop">
-            <TimerReset size={20} />
           </button>
           <button className="icon-button" onClick={addChop} disabled={!isReady} title="Add chop">
             <Plus size={20} />
           </button>
-          <button className="icon-button" onClick={deleteActiveChop} disabled={!isReady} title="Delete chop">
+          <button className="icon-button" onClick={deleteActiveChop} disabled={!activeRegionId} title="Delete chop">
             <Trash2 size={19} />
           </button>
 
@@ -502,7 +625,7 @@ export default function App() {
               min="0"
               step="0.01"
               value={formatSeconds(start)}
-              disabled={!isReady}
+              disabled={!activeRegionId}
               onChange={(event) => updateRegion(Number(event.target.value), end)}
             />
           </label>
@@ -514,7 +637,7 @@ export default function App() {
               min="0"
               step="0.01"
               value={formatSeconds(end)}
-              disabled={!isReady}
+              disabled={!activeRegionId}
               onChange={(event) => updateRegion(start, Number(event.target.value))}
             />
           </label>

@@ -207,12 +207,27 @@ h2 {
 
 .waveform {
   min-height: 300px;
-  padding: 20px 0 0;
+  padding: 8px 0 0;
 }
 
 .timeline {
-  height: 40px;
+  height: 34px;
   color: rgba(247, 244, 238, 0.7);
+  border-bottom: 1px solid rgba(247, 244, 238, 0.1);
+  background: rgba(247, 244, 238, 0.035);
+}
+
+.timeline [part~="timeline"] {
+  color: rgba(247, 244, 238, 0.76);
+}
+
+.timeline [part~="timeline-notch"] {
+  border-color: rgba(247, 244, 238, 0.48);
+}
+
+.timeline [part~="timeline-notch-primary"] {
+  color: #f6bd60;
+  font-weight: 800;
 }
 
 .empty-wave {
@@ -231,9 +246,9 @@ h2 {
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(5, 44px) repeat(2, minmax(120px, 0.34fr)) minmax(260px, 1fr) auto auto;
+  grid-template-columns: repeat(4, 44px) repeat(2, minmax(120px, 0.34fr)) minmax(260px, 1fr) auto auto;
   gap: 12px;
-  align-items: center;
+  align-items: end;
 }
 
 .icon-button {
@@ -250,11 +265,22 @@ h2 {
 .time-field {
   min-width: 0;
   display: grid;
-  gap: 5px;
+  grid-template-rows: 16px 44px;
+  gap: 6px;
   color: rgba(247, 244, 238, 0.64);
   font-size: 0.74rem;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.time-field span {
+  display: flex;
+  align-items: end;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1;
 }
 
 .time-field input {
@@ -480,7 +506,7 @@ h2 {
   }
 
   .controls {
-    grid-template-columns: repeat(5, 44px) 1fr;
+    grid-template-columns: repeat(4, 44px) 1fr;
   }
 
   .time-field,
@@ -515,7 +541,7 @@ h2 {
   }
 
   .controls {
-    grid-template-columns: repeat(5, minmax(38px, 1fr));
+    grid-template-columns: repeat(4, minmax(38px, 1fr));
   }
 
   .icon-button {
