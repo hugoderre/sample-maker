@@ -116,6 +116,7 @@ export default function App() {
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [timelineScroll, setTimelineScroll] = useState(0);
   const [timelineWidth, setTimelineWidth] = useState(0);
+  const [waveformHeight, setWaveformHeight] = useState(300);
 
   const waveformRef = useRef<HTMLDivElement | null>(null);
   const waveWrapRef = useRef<HTMLDivElement | null>(null);
@@ -287,6 +288,10 @@ export default function App() {
     wavesurferRef.current?.zoom(clampedZoom);
   }
 
+  function measureWaveformHeight() {
+    return Math.max(260, Math.round((waveWrapRef.current?.getBoundingClientRect().height || 554) - 34));
+  }
+
   function stopEdgeAutoScroll() {
     autoScrollVelocityRef.current = 0;
     isRegionDragRef.current = false;
@@ -354,6 +359,8 @@ export default function App() {
     setActiveRegionId(null);
     activeRegionRef.current = null;
     activeRegionIdRef.current = null;
+    const measuredHeight = measureWaveformHeight();
+    setWaveformHeight(measuredHeight);
 
     const regions = RegionsPlugin.create();
 
@@ -364,7 +371,7 @@ export default function App() {
       progressColor: '#f28482',
       cursorColor: '#ffffff',
       cursorWidth: 2,
-      height: 280,
+      height: measuredHeight,
       barWidth: 2,
       barGap: 1,
       barRadius: 2,
@@ -455,6 +462,22 @@ export default function App() {
       activeRegionIdRef.current = null;
       pendingRegionUpdateSnapshotRef.current = null;
       historyRef.current = [];
+    };
+  }, [sample]);
+
+  useEffect(() => {
+    const updateWaveformHeight = () => {
+      const nextHeight = measureWaveformHeight();
+      setWaveformHeight(nextHeight);
+      wavesurferRef.current?.setOptions({ height: nextHeight });
+    };
+
+    updateWaveformHeight();
+
+    window.addEventListener('resize', updateWaveformHeight);
+
+    return () => {
+      window.removeEventListener('resize', updateWaveformHeight);
     };
   }, [sample]);
 
