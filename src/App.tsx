@@ -1,5 +1,19 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { Download, Loader2, Pause, Play, Scissors, Search, SkipBack, TimerReset } from 'lucide-react';
+import {
+  Download,
+  ExternalLink,
+  FolderOpen,
+  Layers,
+  Loader2,
+  Pause,
+  Play,
+  Plus,
+  Scissors,
+  Search,
+  SkipBack,
+  TimerReset,
+  Trash2
+} from 'lucide-react';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin, { Region } from 'wavesurfer.js/dist/plugins/regions.esm.js';
 import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js';
@@ -13,9 +27,28 @@ type DownloadedSample = {
   createdAt: string;
 };
 
+type DownloadJob = {
+  id: string;
+  status: 'queued' | 'metadata' | 'downloading' | 'analyzing' | 'done' | 'error';
+  progress: number;
+  message: string;
+  sample: DownloadedSample | null;
+  error: string | null;
+};
+
+type Chop = {
+  id: string;
+  label: string;
+  start: number;
+  end: number;
+};
+
 type ExportResult = {
+  id: string;
+  label: string;
   fileName: string;
   downloadUrl: string;
+  outputPath: string;
   duration: number;
 };
 
@@ -24,6 +57,9 @@ type ApiError = {
 };
 
 const MIN_REGION_SECONDS = 0.05;
+const DEFAULT_CHOP_SECONDS = 8;
+const ACTIVE_COLOR = 'rgba(242, 132, 130, 0.34)';
+const CHOP_COLOR = 'rgba(132, 165, 157, 0.26)';
 
 function formatClock(seconds: number) {
   if (!Number.isFinite(seconds)) return '0:00.000';
@@ -31,6 +67,10 @@ function formatClock(seconds: number) {
   const secs = Math.floor(seconds % 60);
   const millis = Math.floor((seconds % 1) * 1000);
   return `${minutes}:${secs.toString().padStart(2, '0')}.${millis.toString().padStart(3, '0')}`;
+}
+
+function formatSeconds(seconds: number) {
+  return Number.isFinite(seconds) ? seconds.toFixed(2) : '0.00';
 }
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -48,26 +88,90 @@ export default function App() {
   const [end, setEnd] = useState(0);
   const [format, setFormat] = useState<'wav' | 'mp3' | 'aiff'>('wav');
   const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
   const [isReady, setIsReady] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [message, setMessage] = useState('Paste a YouTube URL to start.');
-  const [exportResult, setExportResult] = useState<ExportResult | null>(null);
+  const [exportResults, setExportResults] = useState<ExportResult[]>([]);
+  const [chops, setChops] = useState<Chop[]>([]);
+  const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
 
   const waveformRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<RegionsPlugin | null>(null);
   const activeRegionRef = useRef<Region | null>(null);
+  const activeRegionIdRef = useRef<string | null>(null);
 
   const selectionDuration = useMemo(() => Math.max(0, end - start), [end, start]);
   const canExport = Boolean(sample && isReady && selectionDuration >= MIN_REGION_SECONDS && !isExporting);
+  const currentChopLabel = chops.find((chop) => chop.id === activeRegionId)?.label || 'Selection';
+
+  function paintRegions(activeId = activeRegionIdRef.current) {
+    regionsRef.current?.getRegions().forEach((region) => {
+      region.setOptions({
+        color: region.id === activeId ? ACTIVE_COLOR : CHOP_COLOR
+      });
+    });
+  }
+
+  function syncChops() {
+    const regions = regionsRef.current?.getRegions() || [];
+    const nextChops = regions
+      .slice()
+      .sort((left, right) => left.start - right.start)
+      .map((region, index) => ({
+        id: region.id,
+        label: `Chop ${index + 1}`,
+        start: region.start,
+        end: region.end
+      }));
+
+    setChops(nextChops);
+  }
+
+  function selectRegion(region: Region) {
+    activeRegionRef.current = region;
+    activeRegionIdRef.current = region.id;
+    setActiveRegionId(region.id);
+    setStart(region.start);
+    setEnd(region.end);
+    paintRegions(region.id);
+  }
+
+  function createRegion(nextStart: number, nextEnd: number) {
+    if (!sample || !regionsRef.current) return null;
+
+    const clampedStart = Math.max(0, Math.min(nextStart, sample.duration - MIN_REGION_SECONDS));
+    const clampedEnd = Math.max(
+      clampedStart + MIN_REGION_SECONDS,
+      Math.min(nextEnd, sample.duration)
+    );
+
+    const region = regionsRef.current.addRegion({
+      start: clampedStart,
+      end: clampedEnd,
+      color: ACTIVE_COLOR,
+      drag: true,
+      resize: true,
+      minLength: MIN_REGION_SECONDS
+    });
+
+    selectRegion(region);
+    syncChops();
+    return region;
+  }
 
   useEffect(() => {
     if (!sample || !waveformRef.current || !timelineRef.current) return;
 
     setIsReady(false);
     setIsPlaying(false);
+    setChops([]);
+    setActiveRegionId(null);
+    activeRegionRef.current = null;
+    activeRegionIdRef.current = null;
 
     const regions = RegionsPlugin.create();
     const timeline = TimelinePlugin.create({
@@ -95,22 +199,12 @@ export default function App() {
 
     wavesurferRef.current = wavesurfer;
     regionsRef.current = regions;
-    activeRegionRef.current = null;
 
     wavesurfer.on('ready', () => {
       const initialEnd = Math.min(sample.duration || wavesurfer.getDuration(), 12);
-      const region = regions.addRegion({
-        start: 0,
-        end: initialEnd,
-        color: 'rgba(242, 132, 130, 0.28)',
-        drag: true,
-        resize: true
-      });
-      activeRegionRef.current = region;
-      setStart(region.start);
-      setEnd(region.end);
+      createRegion(0, initialEnd);
       setIsReady(true);
-      setMessage('Drag the handles, then export the slice.');
+      setMessage('Drag the handles, add chops, then export.');
     });
 
     wavesurfer.on('play', () => setIsPlaying(true));
@@ -118,20 +212,19 @@ export default function App() {
     wavesurfer.on('finish', () => setIsPlaying(false));
 
     regions.on('region-updated', (region) => {
-      activeRegionRef.current = region;
-      setStart(region.start);
-      setEnd(region.end);
+      selectRegion(region);
+      syncChops();
     });
 
     regions.on('region-clicked', (region, event) => {
       event.stopPropagation();
-      activeRegionRef.current = region;
-      region.play();
+      selectRegion(region);
+      region.play(true);
     });
 
     regions.on('region-out', (region) => {
       if (activeRegionRef.current === region && wavesurfer.isPlaying()) {
-        region.play();
+        region.play(true);
       }
     });
 
@@ -140,8 +233,34 @@ export default function App() {
       wavesurferRef.current = null;
       regionsRef.current = null;
       activeRegionRef.current = null;
+      activeRegionIdRef.current = null;
     };
   }, [sample]);
+
+  async function pollDownloadJob(jobId: string) {
+    let done = false;
+
+    while (!done) {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+
+      const response = await fetch(`/api/download/${jobId}`);
+      const job = await readJson<DownloadJob>(response);
+      setDownloadProgress(job.progress);
+      setMessage(job.message);
+
+      if (job.status === 'done' && job.sample) {
+        setSample(job.sample);
+        setStart(0);
+        setEnd(Math.min(job.sample.duration, 12));
+        setMessage('Audio loaded. Build your sample.');
+        done = true;
+      }
+
+      if (job.status === 'error') {
+        throw new Error(job.error || 'Download failed.');
+      }
+    }
+  }
 
   async function handleDownload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -149,8 +268,10 @@ export default function App() {
 
     setIsDownloading(true);
     setIsReady(false);
-    setExportResult(null);
-    setMessage('Downloading and converting audio...');
+    setExportResults([]);
+    setChops([]);
+    setDownloadProgress(2);
+    setMessage('Preparing download...');
 
     try {
       const response = await fetch('/api/download', {
@@ -158,15 +279,15 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: url.trim() })
       });
-      const payload = await readJson<DownloadedSample>(response);
-      setSample(payload);
-      setStart(0);
-      setEnd(Math.min(payload.duration, 12));
-      setMessage('Audio loaded. Build your sample.');
+      const job = await readJson<DownloadJob>(response);
+      setDownloadProgress(job.progress);
+      setMessage(job.message);
+      await pollDownloadJob(job.id);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Download failed.');
     } finally {
       setIsDownloading(false);
+      setDownloadProgress(0);
     }
   }
 
@@ -183,6 +304,35 @@ export default function App() {
 
     setStart(clampedStart);
     setEnd(clampedEnd);
+    syncChops();
+  }
+
+  function addChop() {
+    if (!sample) return;
+
+    const anchor = activeRegionRef.current?.end || wavesurferRef.current?.getCurrentTime() || 0;
+    const nextStart = Math.min(Math.max(anchor, 0), Math.max(0, sample.duration - MIN_REGION_SECONDS));
+    const nextEnd = Math.min(nextStart + DEFAULT_CHOP_SECONDS, sample.duration);
+    createRegion(nextStart, nextEnd);
+  }
+
+  function deleteActiveChop() {
+    const region = activeRegionRef.current;
+    if (!region || !regionsRef.current || !sample) return;
+
+    region.remove();
+    const remaining = regionsRef.current.getRegions();
+    if (remaining.length > 0) {
+      selectRegion(remaining[0]);
+      syncChops();
+      return;
+    }
+
+    createRegion(0, Math.min(sample.duration, 12));
+  }
+
+  function resetActiveChop() {
+    updateRegion(0, Math.min(sample?.duration || 12, 12));
   }
 
   function togglePlayback() {
@@ -192,7 +342,7 @@ export default function App() {
       if (wavesurferRef.current.isPlaying()) {
         wavesurferRef.current.pause();
       } else {
-        activeRegionRef.current.play();
+        activeRegionRef.current.play(true);
       }
       return;
     }
@@ -205,22 +355,35 @@ export default function App() {
     wavesurferRef.current.seekTo(start / sample.duration);
   }
 
-  async function handleExport() {
-    if (!sample || !canExport) return;
+  async function exportChop(chop: Chop) {
+    if (!sample) throw new Error('No sample loaded.');
+
+    const response = await fetch('/api/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: sample.id, start: chop.start, end: chop.end, format })
+    });
+    const payload = await readJson<Omit<ExportResult, 'id' | 'label'>>(response);
+
+    return {
+      ...payload,
+      id: crypto.randomUUID(),
+      label: chop.label
+    };
+  }
+
+  async function handleExportActive() {
+    if (!canExport || !activeRegionId) return;
+    const activeChop = chops.find((chop) => chop.id === activeRegionId);
+    if (!activeChop) return;
 
     setIsExporting(true);
-    setExportResult(null);
-    setMessage('Exporting sample...');
+    setMessage(`Exporting ${activeChop.label}...`);
 
     try {
-      const response = await fetch('/api/export', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: sample.id, start, end, format })
-      });
-      const payload = await readJson<ExportResult>(response);
-      setExportResult(payload);
-      setMessage('Sample exported.');
+      const result = await exportChop(activeChop);
+      setExportResults((current) => [result, ...current]);
+      setMessage(`${activeChop.label} exported.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Export failed.');
     } finally {
@@ -228,28 +391,71 @@ export default function App() {
     }
   }
 
+  async function handleExportAll() {
+    if (!sample || chops.length === 0 || isExporting) return;
+
+    setIsExporting(true);
+    setMessage(`Exporting ${chops.length} chops...`);
+
+    try {
+      const results: ExportResult[] = [];
+      for (const chop of chops) {
+        results.push(await exportChop(chop));
+      }
+      setExportResults((current) => [...results.reverse(), ...current]);
+      setMessage(`${chops.length} chops exported.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Export failed.');
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  async function revealExport(path: string) {
+    try {
+      await readJson<{ ok: true }>(
+        await fetch('/api/reveal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path })
+        })
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not reveal file.');
+    }
+  }
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${sample ? 'has-sample' : ''}`}>
       <section className="topbar">
         <div>
           <p className="eyebrow">Sample Maker</p>
-          <h1>From YouTube URL to clean sample slice.</h1>
+          <h1>{sample ? 'Shape the chop.' : 'From YouTube URL to clean sample slice.'}</h1>
         </div>
 
-        <form className="search-form" onSubmit={handleDownload}>
-          <Search aria-hidden="true" size={18} />
-          <input
-            aria-label="YouTube URL"
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
-            placeholder="https://www.youtube.com/watch?v=..."
-            disabled={isDownloading}
-          />
-          <button type="submit" disabled={isDownloading || !url.trim()}>
-            {isDownloading ? <Loader2 className="spin" size={18} /> : <Download size={18} />}
-            <span>{isDownloading ? 'Loading' : 'Fetch'}</span>
-          </button>
-        </form>
+        <div className="search-stack">
+          <form className="search-form" onSubmit={handleDownload}>
+            <Search aria-hidden="true" size={18} />
+            <input
+              aria-label="YouTube URL"
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              placeholder="https://www.youtube.com/watch?v=..."
+              disabled={isDownloading}
+            />
+            <button type="submit" disabled={isDownloading || !url.trim()}>
+              {isDownloading ? <Loader2 className="spin" size={18} /> : <Download size={18} />}
+              <span>{isDownloading ? 'Loading' : 'Fetch'}</span>
+            </button>
+          </form>
+
+          {isDownloading && (
+            <div className="download-meter">
+              <span style={{ width: `${Math.max(4, downloadProgress)}%` }} />
+              <strong>{Math.round(downloadProgress)}%</strong>
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="workspace">
@@ -279,22 +485,23 @@ export default function App() {
           <button className="icon-button" onClick={rewindToSelection} disabled={!isReady} title="Jump to start">
             <SkipBack size={20} />
           </button>
-          <button
-            className="icon-button"
-            onClick={() => updateRegion(0, Math.min(sample?.duration || 12, 12))}
-            disabled={!isReady}
-            title="Reset selection"
-          >
+          <button className="icon-button" onClick={resetActiveChop} disabled={!isReady} title="Reset chop">
             <TimerReset size={20} />
+          </button>
+          <button className="icon-button" onClick={addChop} disabled={!isReady} title="Add chop">
+            <Plus size={20} />
+          </button>
+          <button className="icon-button" onClick={deleteActiveChop} disabled={!isReady} title="Delete chop">
+            <Trash2 size={19} />
           </button>
 
           <label className="time-field">
-            <span>Start</span>
+            <span>{currentChopLabel} start</span>
             <input
               type="number"
               min="0"
               step="0.01"
-              value={start.toFixed(2)}
+              value={formatSeconds(start)}
               disabled={!isReady}
               onChange={(event) => updateRegion(Number(event.target.value), end)}
             />
@@ -306,7 +513,7 @@ export default function App() {
               type="number"
               min="0"
               step="0.01"
-              value={end.toFixed(2)}
+              value={formatSeconds(end)}
               disabled={!isReady}
               onChange={(event) => updateRegion(start, Number(event.target.value))}
             />
@@ -331,18 +538,72 @@ export default function App() {
             ))}
           </div>
 
-          <button className="export-button" onClick={handleExport} disabled={!canExport}>
+          <button className="export-button" onClick={handleExportActive} disabled={!canExport}>
             {isExporting ? <Loader2 className="spin" size={18} /> : <Scissors size={18} />}
             <span>Export</span>
           </button>
         </div>
 
-        {exportResult && (
-          <a className="download-result" href={exportResult.downloadUrl}>
-            <Download size={18} />
-            <span>{exportResult.fileName}</span>
-            <small>{formatClock(exportResult.duration)}</small>
-          </a>
+        {sample && (
+          <div className="lower-panels">
+            <section className="chop-panel">
+              <div className="panel-title">
+                <Layers size={18} />
+                <span>{chops.length} chops</span>
+              </div>
+              <div className="chop-list">
+                {chops.map((chop) => (
+                  <button
+                    key={chop.id}
+                    className={chop.id === activeRegionId ? 'active' : ''}
+                    type="button"
+                    onClick={() => {
+                      const region = regionsRef.current
+                        ?.getRegions()
+                        .find((candidate) => candidate.id === chop.id);
+                      if (region) selectRegion(region);
+                    }}
+                  >
+                    <strong>{chop.label}</strong>
+                    <span>{formatClock(chop.start)}</span>
+                    <span>{formatClock(chop.end - chop.start)}</span>
+                  </button>
+                ))}
+              </div>
+              <button className="secondary-action" onClick={handleExportAll} disabled={!isReady || isExporting}>
+                <Download size={17} />
+                <span>Export all</span>
+              </button>
+            </section>
+
+            <section className="export-panel">
+              <div className="panel-title">
+                <FolderOpen size={18} />
+                <span>Exports</span>
+              </div>
+              {exportResults.length === 0 ? (
+                <p className="muted-line">Exported samples will stack here.</p>
+              ) : (
+                <div className="export-list">
+                  {exportResults.map((result) => (
+                    <div className="export-item" key={result.id}>
+                      <a href={result.downloadUrl}>
+                        <Download size={17} />
+                        <span>{result.fileName}</span>
+                      </a>
+                      <small>
+                        {result.label} / {formatClock(result.duration)}
+                      </small>
+                      <button type="button" onClick={() => revealExport(result.outputPath)}>
+                        <ExternalLink size={16} />
+                        <span>Reveal</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
         )}
       </section>
     </main>
