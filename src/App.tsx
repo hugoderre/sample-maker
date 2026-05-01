@@ -11,7 +11,9 @@ import {
   Scissors,
   Search,
   SkipBack,
-  Trash2
+  Trash2,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-react';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin, { Region } from 'wavesurfer.js/dist/plugins/regions.esm.js';
@@ -42,6 +44,11 @@ type Chop = {
   end: number;
 };
 
+type ChopSnapshot = {
+  activeId: string | null;
+  regions: Array<Pick<Chop, 'id' | 'start' | 'end'>>;
+};
+
 type ExportResult = {
   id: string;
   label: string;
@@ -57,6 +64,9 @@ type ApiError = {
 
 const MIN_REGION_SECONDS = 0.05;
 const DEFAULT_CHOP_SECONDS = 8;
+const DEFAULT_ZOOM = 45;
+const MIN_ZOOM = 24;
+const MAX_ZOOM = 180;
 const EDGE_SCROLL_ZONE = 96;
 const EDGE_SCROLL_MAX_SPEED = 7;
 const ACTIVE_COLOR = 'rgba(242, 132, 130, 0.34)';
@@ -104,6 +114,7 @@ export default function App() {
   const [exportResults, setExportResults] = useState<ExportResult[]>([]);
   const [chops, setChops] = useState<Chop[]>([]);
   const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(DEFAULT_ZOOM);
 
   const waveformRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -115,6 +126,9 @@ export default function App() {
   const autoScrollFrameRef = useRef<number | null>(null);
   const autoScrollVelocityRef = useRef(0);
   const isRegionDragRef = useRef(false);
+  const historyRef = useRef<ChopSnapshot[]>([]);
+  const pendingRegionUpdateSnapshotRef = useRef<ChopSnapshot | null>(null);
+  const isRestoringRef = useRef(false);
 
   const selectionDuration = useMemo(() => Math.max(0, end - start), [end, start]);
   const canExport = Boolean(
@@ -145,6 +159,23 @@ export default function App() {
     setChops(nextChops);
   }
 
+  function getSnapshot(): ChopSnapshot {
+    return {
+      activeId: activeRegionIdRef.current,
+      regions: (regionsRef.current?.getRegions() || []).map((region) => ({
+        id: region.id,
+        start: region.start,
+        end: region.end
+      }))
+    };
+  }
+
+  function pushHistory(snapshot = getSnapshot()) {
+    if (isRestoringRef.current) return;
+
+    historyRef.current = [...historyRef.current.slice(-49), snapshot];
+  }
+
   function selectRegion(region: Region) {
     activeRegionRef.current = region;
     activeRegionIdRef.current = region.id;
@@ -152,6 +183,49 @@ export default function App() {
     setStart(region.start);
     setEnd(region.end);
     paintRegions(region.id);
+  }
+
+  function restoreSnapshot(snapshot: ChopSnapshot) {
+    if (!regionsRef.current) return;
+
+    isRestoringRef.current = true;
+    regionsRef.current.clearRegions();
+    activeRegionRef.current = null;
+    activeRegionIdRef.current = null;
+
+    const restoredRegions = snapshot.regions.map((region) =>
+      regionsRef.current!.addRegion({
+        id: region.id,
+        start: region.start,
+        end: region.end,
+        color: region.id === snapshot.activeId ? ACTIVE_COLOR : CHOP_COLOR,
+        drag: true,
+        resize: true,
+        minLength: MIN_REGION_SECONDS
+      })
+    );
+
+    const activeRegion =
+      restoredRegions.find((region) => region.id === snapshot.activeId) || restoredRegions[0] || null;
+
+    if (activeRegion) {
+      selectRegion(activeRegion);
+    } else {
+      setActiveRegionId(null);
+      setStart(0);
+      setEnd(0);
+    }
+
+    syncChops();
+    isRestoringRef.current = false;
+  }
+
+  function undoLastAction() {
+    const snapshot = historyRef.current.pop();
+    if (!snapshot) return;
+
+    restoreSnapshot(snapshot);
+    setMessage('Undo.');
   }
 
   function createRegion(nextStart: number, nextEnd: number) {
@@ -175,6 +249,21 @@ export default function App() {
     selectRegion(region);
     syncChops();
     return region;
+  }
+
+  function playActiveRegion() {
+    const wavesurfer = wavesurferRef.current;
+    const region = activeRegionRef.current;
+    if (!wavesurfer || !region) return;
+
+    wavesurfer.setTime(region.start);
+    wavesurfer.play();
+  }
+
+  function updateZoom(nextZoom: number) {
+    const clampedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
+    setZoom(clampedZoom);
+    wavesurferRef.current?.zoom(clampedZoom);
   }
 
   function stopEdgeAutoScroll() {
@@ -271,7 +360,7 @@ export default function App() {
       barGap: 1,
       barRadius: 2,
       normalize: true,
-      minPxPerSec: 45,
+      minPxPerSec: zoom,
       plugins: [regions, timeline]
     });
 
@@ -288,6 +377,7 @@ export default function App() {
     );
 
     wavesurfer.on('ready', () => {
+      wavesurfer.zoom(zoom);
       setIsReady(true);
       setStart(0);
       setEnd(0);
@@ -298,7 +388,21 @@ export default function App() {
     wavesurfer.on('pause', () => setIsPlaying(false));
     wavesurfer.on('finish', () => setIsPlaying(false));
 
+    regions.on('region-initialized', () => {
+      pushHistory();
+    });
+
+    regions.on('region-update', () => {
+      if (!pendingRegionUpdateSnapshotRef.current) {
+        pendingRegionUpdateSnapshotRef.current = getSnapshot();
+      }
+    });
+
     regions.on('region-updated', (region) => {
+      if (pendingRegionUpdateSnapshotRef.current) {
+        pushHistory(pendingRegionUpdateSnapshotRef.current);
+        pendingRegionUpdateSnapshotRef.current = null;
+      }
       selectRegion(region);
       syncChops();
     });
@@ -311,12 +415,12 @@ export default function App() {
     regions.on('region-clicked', (region, event) => {
       event.stopPropagation();
       selectRegion(region);
-      region.play(true);
+      playActiveRegion();
     });
 
     regions.on('region-out', (region) => {
       if (activeRegionRef.current === region && wavesurfer.isPlaying()) {
-        region.play(true);
+        playActiveRegion();
       }
     });
 
@@ -328,8 +432,14 @@ export default function App() {
       regionsRef.current = null;
       activeRegionRef.current = null;
       activeRegionIdRef.current = null;
+      pendingRegionUpdateSnapshotRef.current = null;
+      historyRef.current = [];
     };
   }, [sample]);
+
+  useEffect(() => {
+    wavesurferRef.current?.zoom(zoom);
+  }, [zoom]);
 
   useEffect(() => {
     const waveWrap = waveWrapRef.current;
@@ -445,6 +555,7 @@ export default function App() {
     const region = activeRegionRef.current;
     if (!region || !regionsRef.current) return;
 
+    pushHistory();
     region.remove();
     const remaining = regionsRef.current.getRegions();
     if (remaining.length > 0) {
@@ -468,7 +579,7 @@ export default function App() {
       if (wavesurferRef.current.isPlaying()) {
         wavesurferRef.current.pause();
       } else {
-        activeRegionRef.current.play(true);
+        playActiveRegion();
       }
       return;
     }
@@ -480,6 +591,43 @@ export default function App() {
     if (!wavesurferRef.current || !sample) return;
     wavesurferRef.current.seekTo(start / sample.duration);
   }
+
+  function handleTimeFieldFocus() {
+    if (activeRegionId) {
+      pushHistory();
+    }
+  }
+
+  useEffect(() => {
+    function isEditableTarget(target: EventTarget | null) {
+      return (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      );
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (isEditableTarget(event.target)) return;
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        undoLastAction();
+        return;
+      }
+
+      if (event.code === 'Space') {
+        event.preventDefault();
+        togglePlayback();
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  });
 
   async function exportChop(chop: Chop) {
     if (!sample) throw new Error('No sample loaded.');
@@ -618,6 +766,21 @@ export default function App() {
             <Trash2 size={19} />
           </button>
 
+          <div className="zoom-control">
+            <ZoomOut size={17} />
+            <input
+              aria-label="Horizontal zoom"
+              type="range"
+              min={MIN_ZOOM}
+              max={MAX_ZOOM}
+              step="1"
+              value={zoom}
+              disabled={!sample}
+              onChange={(event) => updateZoom(Number(event.target.value))}
+            />
+            <ZoomIn size={17} />
+          </div>
+
           <label className="time-field">
             <span>{currentChopLabel} start</span>
             <input
@@ -626,6 +789,7 @@ export default function App() {
               step="0.01"
               value={formatSeconds(start)}
               disabled={!activeRegionId}
+              onFocus={handleTimeFieldFocus}
               onChange={(event) => updateRegion(Number(event.target.value), end)}
             />
           </label>
@@ -638,6 +802,7 @@ export default function App() {
               step="0.01"
               value={formatSeconds(end)}
               disabled={!activeRegionId}
+              onFocus={handleTimeFieldFocus}
               onChange={(event) => updateRegion(start, Number(event.target.value))}
             />
           </label>

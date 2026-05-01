@@ -246,7 +246,7 @@ h2 {
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(4, 44px) repeat(2, minmax(120px, 0.34fr)) minmax(260px, 1fr) auto auto;
+  grid-template-columns: repeat(4, 44px) minmax(160px, 0.45fr) repeat(2, minmax(120px, 0.34fr)) minmax(260px, 1fr) auto auto;
   gap: 12px;
   align-items: end;
 }
@@ -260,6 +260,28 @@ h2 {
   background: rgba(247, 244, 238, 0.1);
   border: 1px solid rgba(247, 244, 238, 0.14);
   cursor: pointer;
+}
+
+.zoom-control {
+  height: 44px;
+  display: grid;
+  grid-template-columns: auto minmax(92px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 0 10px;
+  color: rgba(247, 244, 238, 0.72);
+  background: rgba(247, 244, 238, 0.08);
+  border: 1px solid rgba(247, 244, 238, 0.14);
+}
+
+.zoom-control input {
+  width: 100%;
+  min-width: 0;
+  accent-color: #f6bd60;
+}
+
+.zoom-control:has(input:disabled) {
+  opacity: 0.48;
 }
 
 .time-field {
@@ -509,6 +531,7 @@ h2 {
     grid-template-columns: repeat(4, 44px) 1fr;
   }
 
+  .zoom-control,
   .time-field,
   .selection-readout,
   .format-switch,
